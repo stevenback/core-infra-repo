@@ -1,0 +1,14 @@
+[Unit]
+Description=PingFederate 9.3.2
+Documentation=https://docs.pingidentity.com
+
+[Install]
+WantedBy=multi-user.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/pingfederate/latest/pingfederate/
+Environment='JAVA_HOME=/usr/java/latest'
+ExecStart=/opt/pingfederate/latest/pingfederate/bin/run.sh
+ExecStop=/opt/pingfederate/latest/pingfederate/sbin/pingfederate-shutdown.sh
