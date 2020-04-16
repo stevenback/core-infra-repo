@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: Template for Repo Federate Infrastructure
+Description: Template for Repo S3 Bucket Manager
 
 # Assumptions - Foundational network is created with three tiered subnet arch
 #               Endpoints are created for SSM, Logs, Monitoring, Cloudformation, S3
@@ -12,12 +12,7 @@ Description: Template for Repo Federate Infrastructure
 #               SNS Topic is required for alerting
 #               Wawa SSM Core Policy (excludes get parameters)
 #
-#   required for RDS:
-#   Create Repofederate_access_grant table - mysql -h <database hostname> -u admin -p Repo < /opt/Repofederate/latest/Repofederate/server/default/conf/access-grant/sql-scripts/access-grant-mysql.sql
-#   Create Repofederate_access_grant_attr table - mysql -h <database hostname> -u admin -p Repo < /opt/Repofederate/latest/Repofederate/server/default/conf/access-grant/sql-scripts/access-grant-attribute-mysql.sql
-#   CREATE USER 'Repofed'@'%' IDENTIFIED BY '<password>' PASSWORD EXPIRE NEVER;
-#   GRANT ALL ON Repo.* TO 'Repofed'@'%' WITH GRANT OPTION;
-#   FLUSH PRIVILEGES;
+
 
 Parameters:
   BranchName:
@@ -59,37 +54,12 @@ Parameters:
   DBInstanceType:
     Description: Instance Type for Repo Database
     Type: String
-
-  DBUsername:
-    Description: Master Username for DB
-    Type: String
-
-  DBAllocatedStorage:
-    Description: The amount of storage (in gigabytes) to be initially allocated for the database instance.
-    Type: String
   
-  ConsoleInstanceType:
-    Description: Instance Type for Console Instances  
+  ManagerInstanceType:
+    Description: Instance Type for Manager Instances  
     Type: String
     Default: m5.large
 
-  EngineInstanceType:
-    Description: Instance Type for Engine Instances 
-    Type: String
-    Default: m5.large
-
-  # EngineSpotPrice:
-  #   Description: Spot Price Max for Engine Instances 
-  #   Type: String
-  #   Default: "0"
-
-  LicenseFile:
-    Description: Name of license file for this environment
-    Type: String
-
-  ConsoleStaticIp:
-    Description: Static Ip address for Console Instnace
-    Type: String
 
   RepoRepoUrl:
     Description: URL for Repo Repo
@@ -123,155 +93,11 @@ Conditions:
   IsProd: !Equals [!Ref Environment, prod]
 
 Resources: 
-  RepoDB: 
-    Type: "AWS::RDS::DBInstance"
-    DeletionPolicy: Snapshot
-    Properties: 
-      AllocatedStorage: 
-        Ref: DBAllocatedStorage
-      DBInstanceClass: 
-        Ref: DBInstanceType
-      DBInstanceIdentifier: !Sub ${Environment}Repomysql
-      DBName: Repo
-      EnableCloudwatchLogsExports: 
-        - "general"
-        - "slowquery"
-        - "error"
-      Engine: MySQL
-      EngineVersion: "8.0.16"
-      MasterUserPassword: !Join ['', ['{{resolve:secretsmanager:', !Ref RDSInstanceRotationSecret, ':SecretString:password}}' ]]
-      MasterUsername: 
-        Ref: DBUsername
-      # MultiAZ: !If [IsProd, true, false]
-      MultiAZ: true
-      StorageEncrypted: true
-      StorageType: gp2
-      DBSubnetGroupName: !Ref RepoDBSubnetGroup
-      VPCSecurityGroups: 
-        - !Ref RepoDBSecurityGroup2
-      Tags: 
-        - 
-          Key: Name
-          Value: "Repo Database - MySql"
-        -
-          Key: Environment
-          Value: !Sub ${Environment}
-        -
-          Key: Owner
-          Value: InfrastructureServices@wawa.com
-        -
-          Key: Platform
-          Value: Repo
-
-  # Create a secret with the username admin and a randomly generated password in JSON.  
-  RDSInstanceRotationSecret:
-    Type: AWS::SecretsManager::Secret
-    Properties:
-      Description: !Sub 'Secret for Repo RDS instance Password In ${Environment} Environment'
-      GenerateSecretString:
-        SecretStringTemplate: '{"username": "admin"}'
-        GenerateStringKey: 'password'
-        PasswordLength: 16
-        ExcludeCharacters: '"@/\'
-  
-  RepoDBSecret:
-    Type: AWS::SecretsManager::Secret
-    Properties:
-      Description: !Sub 'Secret for Repofed database Password In ${Environment} Environment'
-      GenerateSecretString:
-        SecretStringTemplate: '{"username": "Repofed"}'
-        GenerateStringKey: 'password'
-        PasswordLength: 16
-        ExcludeCharacters: '"@/\'
-
-  RepoDBSubnetGroup: 
-    Type: "AWS::RDS::DBSubnetGroup"
-    Properties:       
-      DBSubnetGroupDescription: Database subnets
-      SubnetIds: !Ref DatabaseSubnets    
-
-  RepoDBSecurityGroup2:
+   ManagerSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties: 
       VpcId: !Ref VPCId
-      GroupDescription: Security Group for Repo DB instance
-      GroupName: !Sub 'Repo-db-${Environment}-sg'
-      SecurityGroupIngress: 
-        - SourceSecurityGroupId: !Ref EngineSecurityGroup
-          IpProtocol: tcp
-          FromPort: 3306
-          ToPort: 3306
-          Description: Allow Engine SG to talk to Repo DB
-        - SourceSecurityGroupId: !Ref ConsoleSecurityGroup
-          IpProtocol: tcp
-          FromPort: 3306
-          ToPort: 3306
-          Description: Allow Console SG to talk to Repo DB
-
-  RDSDNSEntry:
-    Type: AWS::Route53::RecordSet
-    Properties:
-      HostedZoneName: wawa.com.
-      Comment: Repo RDS Entry Point
-      Name: !Join ['', [!Sub 'fed${Environment}rds.', wawa.com, .]]
-      Type: CNAME
-      TTL: '300'
-      ResourceRecords:
-      - !GetAtt RepoDB.Endpoint.Address
-  
-  ALBDNSEntry:
-    Type: AWS::Route53::RecordSet
-    Properties:
-      HostedZoneName: !Sub ${PublicHostedDomainUrl}.
-      Comment: Public ALB for Repo Engines
-      Name: !Join ['', [!Sub 'fed${Environment}.', !Sub '${PublicHostedDomainUrl}', .]]
-      Type: CNAME
-      TTL: '300'
-      ResourceRecords:
-      - !GetAtt EngineALB.DNSName
-
-  EngineALBTargetGroup:
-    Type: AWS::ElasticLoadBalancingV2::TargetGroup
-    Properties:
-      HealthCheckEnabled: true
-      HealthCheckPath: /pf/heartbeat.Repo
-      HealthCheckPort: 9031
-      HealthCheckProtocol: HTTPS
-      HealthyThresholdCount: 2
-      Name: !Sub 'Repo-engines-${Environment}-tg'
-      Port: 9031
-      Protocol: HTTPS
-      TargetType: instance
-      VpcId: !Ref VPCId
-
-  EngineALB:
-    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
-    Properties: 
-      Name: !Sub 'Repo-engine-${Environment}-alb'
-      Scheme: internet-facing
-      SecurityGroups: 
-        - !Ref ImpervaSecurityGroup
-        - !Ref EngineALBSecurityGroup
-      Subnets: !Ref PublicSubnets
-      Type: application
-
-  EngineALBListener:
-    Type: AWS::ElasticLoadBalancingV2::Listener
-    Properties: 
-      Certificates: 
-        - CertificateArn: !Sub ${RepoCertArn}
-      DefaultActions: 
-        - Type: "forward"
-          TargetGroupArn: !Ref EngineALBTargetGroup
-      LoadBalancerArn: !Ref EngineALB
-      Port: 443
-      Protocol: HTTPS
-
-  ConsoleSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties: 
-      VpcId: !Ref VPCId
-      GroupDescription: Security Group for Repo Console Instance
+      GroupDescription: Security Group for Manager Instance
       GroupName: !Sub 'Repo-console-${Environment}-sg'
       SecurityGroupIngress: 
         # Put this in for the health check, will need to reevaluate 
@@ -305,334 +131,18 @@ Resources:
           ToPort: 443
           Description: HTTPS trafic from Citrix
 
-  ConsoleSGIngressRule7600:
+  ManagerSGIngressRule443:
     Type: 'AWS::EC2::SecurityGroupIngress'
     Properties:
-      Description: Port 7600 from Engine SG
-      GroupId: !GetAtt ConsoleSecurityGroup.GroupId
+      Description: Port 443 from Manager SG
+      GroupId: !GetAtt ManagerSecurityGroup.GroupId
       IpProtocol: tcp
-      FromPort: '7600'
-      ToPort: '7600'
-      SourceSecurityGroupId: !Ref EngineSecurityGroup  
+      FromPort: '443'
+      ToPort: '443'
+      SourceSecurityGroupId: !Ref ManagerSecurityGroup  
 
-  ConsoleSGIngressRule7700:
-    Type: 'AWS::EC2::SecurityGroupIngress'
-    Properties:
-      Description: Port 7700 from Engine SG
-      GroupId: !GetAtt ConsoleSecurityGroup.GroupId
-      IpProtocol: tcp
-      FromPort: '7700'
-      ToPort: '7700'
-      SourceSecurityGroupId: !Ref EngineSecurityGroup
-
-  EngineSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties: 
-      VpcId: !Ref VPCId
-      GroupDescription: Security Group for Repo Engine Instances 
-      GroupName: !Sub 'Repo-engine-${Environment}-sg'
-      SecurityGroupIngress: 
-        - SourceSecurityGroupId: !Ref SSMSecurityGroup
-          IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          Description: HTTPS traffic from Systems Manager endpoint 
-        - SourceSecurityGroupId: !Ref EngineALBSecurityGroup
-          IpProtocol: tcp
-          FromPort: 9031
-          ToPort: 9031
-          Description: Allowing port 9031 from the load balancer security group
-
-  EngineeSGIngressRule7600:
-    Type: 'AWS::EC2::SecurityGroupIngress'
-    Properties:
-      Description: Port 7600 from EngConsoleine SG
-      GroupId: !GetAtt EngineSecurityGroup.GroupId
-      IpProtocol: tcp
-      FromPort: '7600'
-      ToPort: '7600'
-      SourceSecurityGroupId: !Ref ConsoleSecurityGroup
-
-  EngineSGIngressRule7700:
-    Type: 'AWS::EC2::SecurityGroupIngress'
-    Properties:
-      Description: Port 7700 from Console SG
-      GroupId: !GetAtt EngineSecurityGroup.GroupId
-      IpProtocol: tcp
-      FromPort: '7700'
-      ToPort: '7700'
-      SourceSecurityGroupId: !Ref ConsoleSecurityGroup      
-
-  EngineSGIngressRule7600Self:
-    Type: 'AWS::EC2::SecurityGroupIngress'
-    Properties:
-      Description: Port 7760 from Self
-      GroupId: !GetAtt EngineSecurityGroup.GroupId
-      IpProtocol: tcp
-      FromPort: '7600'
-      ToPort: '7600'
-      SourceSecurityGroupId: !Ref EngineSecurityGroup
-
-  EngineSGIngressRule7700Self:
-    Type: 'AWS::EC2::SecurityGroupIngress'
-    Properties:
-      Description: Port 7700 from Self
-      GroupId: !GetAtt EngineSecurityGroup.GroupId
-      IpProtocol: tcp
-      FromPort: '7700'
-      ToPort: '7700'
-      SourceSecurityGroupId: !Ref EngineSecurityGroup  
-
-  EngineALBSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties: 
-      VpcId: !Ref VPCId
-      GroupDescription: Security Group for Repo Engine ALB
-      GroupName: !Sub 'Repo-enginealb-${Environment}-sg'
-
-  SSMSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties: 
-      VpcId: !Ref VPCId
-      GroupDescription: Security Group for Systems Manager
-      GroupName: !Sub 'Repo-ssm-${Environment}-sg'
-      SecurityGroupIngress: 
-        - CidrIp: !Ref VPCCidr
-          IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          Description: Sessions Manager HTTPS from Local
-
-  EngineASGroup: 
-    Type: AWS::AutoScaling::AutoScalingGroup
-    Properties: 
-      VPCZoneIdentifier: !Ref PrivateSubnets
-      AutoScalingGroupName: !Sub 'Repo-engine-${Environment}-asg'
-      Cooldown: 120
-      AvailabilityZones: 
-        - us-east-1a
-        - us-east-1b
-      LaunchConfigurationName: 
-        Ref: "EngineLaunchConfig"
-      MinSize: !Ref EngineASGMinSize
-      MaxSize: !If [IsProd, "5", "3"]
-      NotificationConfigurations:
-        - TopicARN:
-            Ref: RepoSNSARN
-          NotificationTypes:
-          - autoscaling:EC2_INSTANCE_LAUNCH
-          - autoscaling:EC2_INSTANCE_LAUNCH_ERROR
-          - autoscaling:EC2_INSTANCE_TERMINATE
-          - autoscaling:EC2_INSTANCE_TERMINATE_ERROR
-      # Spot Price configuration - non-prod only    
-      # SpotPrice: !If [IsProd, "", !Ref EngineSpotPrice]
-      TargetGroupARNs: 
-        - !Ref EngineALBTargetGroup 
-      Tags:
-        -
-          Key: Name
-          Value: !Sub Repo Engine - ${Environment}  
-          PropagateAtLaunch: True
-        -
-          Key: Environment
-          Value: !Sub ${Environment}
-          PropagateAtLaunch: True
-        -
-          Key: Owner
-          Value: InfrastructureServices@wawa.com
-          PropagateAtLaunch: True
-        -
-          Key: Application
-          Value: !Sub "Repo Cluster - ${Environment}"
-          PropagateAtLaunch: True
-        -
-          Key: Platform
-          Value: Repo
-          PropagateAtLaunch: True
-
-  EngineScaleOutPolicy:
-    Type: AWS::AutoScaling::ScalingPolicy
-    Properties:
-      AdjustmentType: ChangeInCapacity
-      AutoScalingGroupName:
-        Ref: EngineASGroup
-      Cooldown: '90'
-      ScalingAdjustment: '1'
-
-  EngineCPUAlarmHigh:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      EvaluationPeriods: '1'
-      Statistic: Average
-      Threshold: '80'
-      AlarmDescription: Alarm if CPU too high (50%) or metric disappears indicating instance
-        is down
-      Period: '60'
-      AlarmActions:
-      - Ref: EngineScaleOutPolicy
-      - Ref: RepoSNSARN   
-      Namespace: AWS/EC2
-      Dimensions:
-      - Name: AutoScalingGroupName
-        Value:
-          Ref: EngineASGroup
-      ComparisonOperator: GreaterThanThreshold
-      MetricName: CPUUtilization
-
-  EngineLaunchConfig: 
-    Type: AWS::AutoScaling::LaunchConfiguration
-    Metadata:
-      Comment: Configuration for Cloudwatch Forwarding
-      AWS::CloudFormation::Init:
-        config:
-          files:
-            "/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json":
-              content: !Sub | 
-                   {
-                            "agent": {
-                                    "metrics_collection_interval": 60,
-                                    "run_as_user": "root"
-                            },
-                            "logs": {
-                                    "logs_collected": {
-                                            "files": {
-                                                    "collect_list": [
-                                                            {
-                                                                    "file_path": "/opt/Repofederate/latest/Repofederate/log/server.log",
-                                                                    "log_group_name": "${Environment}_Repo_engines",
-                                                                    "log_stream_name": "{instance_id}/server.log"
-                                                            },
-                                                            {
-                                                                    "file_path": "/opt/Repofederate/latest/Repofederate/log/audit.log",
-                                                                    "log_group_name": "${Environment}_Repo_engines",
-                                                                    "log_stream_name": "{instance_id}/audit.log"
-                                                            }
-                                                    ]
-                                            }
-                                    }
-                            },
-                            "metrics": {
-                                    "append_dimensions": {
-                                            "AutoScalingGroupName": "${!aws:AutoScalingGroupName}",
-                                            "ImageId": "${!aws:ImageId}",
-                                            "InstanceId": "${!aws:InstanceId}",
-                                            "InstanceType": "${!aws:InstanceType}"
-                                    },
-                                    "metrics_collected": {
-                                            "cpu": {
-                                                    "measurement": [
-                                                            "cpu_usage_idle",
-                                                            "cpu_usage_iowait",
-                                                            "cpu_usage_user",
-                                                            "cpu_usage_system"
-                                                    ],
-                                                    "metrics_collection_interval": 60,
-                                                    "resources": [
-                                                            "*"
-                                                    ],
-                                                    "totalcpu": false
-                                            },
-                                            "disk": {
-                                                    "measurement": [
-                                                            "used_percent",
-                                                            "inodes_free"
-                                                    ],
-                                                    "metrics_collection_interval": 60,
-                                                    "resources": [
-                                                            "*"
-                                                    ]
-                                            },
-                                            "diskio": {
-                                                    "measurement": [
-                                                            "io_time"
-                                                    ],
-                                                    "metrics_collection_interval": 60,
-                                                    "resources": [
-                                                            "*"
-                                                    ]
-                                            },
-                                            "mem": {
-                                                    "measurement": [
-                                                            "mem_used_percent"
-                                                    ],
-                                                    "metrics_collection_interval": 60
-                                            },
-                                            "statsd": {
-                                                    "metrics_aggregation_interval": 60,
-                                                    "metrics_collection_interval": 60,
-                                                    "service_address": ":8125"
-                                            },
-                                            "swap": {
-                                                    "measurement": [
-                                                            "swap_used_percent"
-                                                    ],
-                                                    "metrics_collection_interval": 60
-                                            }
-                                    }
-                            }
-                    }
-              mode: '000644'
-              owner: "root"
-              group: "root"
-    Properties: 
-      BlockDeviceMapRepos: 
-        - DeviceName: "/dev/sda1"
-          Ebs:            
-            Encrypted: true
-            VolumeSize: 100
-            VolumeType: standard
-      IamInstanceProfile: !Ref EnginesInstanceProfile
-      ImageId: !Ref EngineAMI
-      UserData:
-        Fn::Base64: !Sub | 
-          #!/bin/bash -x
-          mkdir -p /tmp/aws
-          cd /tmp/aws
-          wget https://s3.amazonaws.com/amazoncloudwatch-agent/amazon_linux/amd64/latest/amazon-cloudwatch-agent.rpm
-          rpm -ivh amazon-cloudwatch-agent.rpm
-          # Everything below is done through Squid
-          export http_proxy=http://squid.wawa.com:3128 && export https_proxy=$http_proxy
-          systemctl start amazon-ssm-agent
-          # Get the latest CloudFormation package
-          easy_install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-latest.tar.gz 
-          yum install python3-pip git mysql java-1.8.0 nmap-ncat -y
-          mkdir -p /usr/java
-          ln -s $(ls -d /usr/lib/jvm/java*/jre/) /usr/java/latest
-          echo "export JAVA_HOME=/usr/java/latest" > /etc/profile.d/java.sh
-          source /etc/profile.d/java.sh
-          export GIT_USERNAME=$(aws ssm get-parameter --name RepoGitHubUser --with-decryption --query 'Parameter.Value' --output text --region us-east-1)
-          export GIT_TOKEN=$(aws ssm get-parameter --name RepoGitHubToken --with-decryption --query 'Parameter.Value' --output text --region us-east-1)
-          mkdir -p /tmp/Repo
-          git clone --single-branch --branch ${BranchName} https://$GIT_USERNAME:$GIT_TOKEN@${RepoRepoUrl} /tmp/Repo/wawa-infra-Repoconfig
-          mkdir /opt/Repofederate
-          ln -s /opt/Repofederate1-9.3.2/ /opt/Repofederate/latest
-          cp -R /tmp/Repo/wawa-infra-Repoconfig/Repofederate1-9.3.1_engine /opt/Repofederate1-9.3.1
-          cp -R /tmp/Repo/wawa-infra-Repoconfig/Repofederate1-9.3.2_engine /opt/Repofederate1-9.3.2
-          cp /tmp/Repo/wawa-infra-Repoconfig/licenses/${LicenseFile} /opt/Repofederate1-9.3.2/Repofederate/server/default/conf/Repofederate.lic
-          mv /tmp/Repo/wawa-infra-Repoconfig/tools/Repofederate.service /etc/systemd/system/ 
-          chmod 744 /opt/Repofederate/latest/Repofederate/sbin/*.sh /opt/Repofederate/latest/Repofederate/bin/*.sh
-          # Remove proxy settings for s3 access
-          unset http_proxy && unset https_proxy
-          # Start cfn-init
-          /usr/bin/cfn-init -s ${AWS::StackId} -r EngineLaunchConfig --region ${AWS::Region} || error_exit 'Failed to run cfn-init'
-          systemctl start amazon-cloudwatch-agent
-          systemctl daemon-reload 
-          systemctl enable Repofederate.service
-          systemctl start Repofederate
-          systemctl start ntpd
-      SecurityGroups: 
-        - Ref: "EngineSecurityGroup"
-        - Ref: "McAfeeSecurityGroup"
-      InstanceType: !Ref EngineInstanceType
-
-  EnginesInstanceProfile:    
-    Type: AWS::IAM::InstanceProfile
-    Properties: 
-      InstanceProfileName: !Sub 'Repo-engines-${Environment}-instanceprofile'
-      Roles: 
-        - !Ref RepoInstanceRole 
-
-  ConsoleServerInstance:
+  
+  ManagerServerInstance:
       Type: 'AWS::EC2::Instance'
       Metadata:
         Comment: Configuration for Cloudwatch Forwarding
@@ -651,14 +161,9 @@ Resources:
                                               "files": {
                                                       "collect_list": [
                                                               {
-                                                                      "file_path": "/opt/Repofederate/latest/Repofederate/log/server.log",
+                                                                      "file_path": "/var/log/messages",
                                                                       "log_group_name": "${Environment}_Repo_consoles",
                                                                       "log_stream_name": "{instance_id}/server.log"
-                                                              },
-                                                              {
-                                                                      "file_path": "/opt/Repofederate/latest/Repofederate/log/audit.log",
-                                                                      "log_group_name": "${Environment}_Repo_consoles",
-                                                                      "log_stream_name": "{instance_id}/audit.log"
                                                               }
                                                       ]
                                               }
@@ -735,14 +240,14 @@ Resources:
               VolumeSize: 100
               VolumeType: standard
         ImageId: !Ref WawaRedhatAMI
-        InstanceType: !Ref ConsoleInstanceType
+        InstanceType: !Ref ManagerInstanceType
         NetworkInterfaces:
           - DeviceIndex: 0
-            PrivateIpAddress: !Ref ConsoleStaticIp
+            PrivateIpAddress: !Ref ManagerStaticIp
             SubnetId: !Select [ 0, !Ref PrivateSubnets ]        
             GroupSet: 
-              - Ref: "ConsoleSecurityGroup"
-        IamInstanceProfile: !Ref ConsolesInstanceProfile
+              - Ref: "ManagerSecurityGroup"
+        IamInstanceProfile: !Ref ManagersInstanceProfile
         UserData: 
           Fn::Base64: !Sub | 
             #!/bin/bash -x  
@@ -774,7 +279,7 @@ Resources:
             # Remove proxy settings for s3 access
             unset http_proxy && unset https_proxy
             # Start cfn-init
-            /usr/bin/cfn-init -s ${AWS::StackId} -r ConsoleServerInstance --region ${AWS::Region} || error_exit 'Failed to run cfn-init'
+            /usr/bin/cfn-init -s ${AWS::StackId} -r ManagerServerInstance --region ${AWS::Region} || error_exit 'Failed to run cfn-init'
             systemctl start amazon-cloudwatch-agent
             chmod 744 /opt/Repofederate/latest/Repofederate/sbin/*.sh /opt/Repofederate/latest/Repofederate/bin/*.sh
             # Copy over the latest archive from S3
@@ -787,7 +292,7 @@ Resources:
         Tags:
           -
             Key: Name
-            Value: !Sub Repo Console - ${Environment}
+            Value: !Sub Repo Manager - ${Environment}
           -
             Key: Environment
             Value: !Sub ${Environment}
@@ -801,7 +306,7 @@ Resources:
             Key: Platform
             Value: Repo
 
-  ConsolesInstanceProfile:    
+  ManagersInstanceProfile:    
     Type: AWS::IAM::InstanceProfile
     Properties: 
       InstanceProfileName: !Sub 'Repo-console-${Environment}-instanceprofile'
@@ -890,7 +395,7 @@ Resources:
             Condition:
               StringEquals:
                 ec2:ResourceTag/*: 
-                  - "Repo Console"
+                  - "Repo Manager"
           - 
             Effect: "Allow"
             Action: "ssm:SendCommand"
@@ -936,7 +441,7 @@ Resources:
   ConfigBackupRule: 
     Type: AWS::Events::Rule
     Properties: 
-      Description: "Repo Console - Configuration Backup"
+      Description: "Repo Manager - Configuration Backup"
       Name: !Sub Repo_config_backup_${Environment}
       ScheduleExpression: "cron(0 10 * * ? *)"
       State: "ENABLED"
@@ -960,7 +465,7 @@ Resources:
               -
                   Key: tag:Name
                   Values:
-                    - !Sub Repo Console - ${Environment}
+                    - !Sub Repo Manager - ${Environment}
               -   Key: tag:Environment
                   Values: 
                     - !Sub ${Environment}
@@ -979,22 +484,22 @@ Resources:
 # Monitoring Resources
 ######################################
 
- # ConsoleCPUAnomalyDetector:
+ # ManagerCPUAnomalyDetector:
   #   Type: AWS::CloudWatch::AnomalyDetector
   #   Properties:
   #     MetricName: CPU
   #     Namespace: AWS/EC2
   #     Stat: Average
 
-  ConsoleHealthyAlarm:
+  ManagerHealthyAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
       ActionsEnabled: true
       AlarmActions:
         - !Ref RepoSNSARN    
-      AlarmDescription: Alarm when Repo Console instance status check fails for 5
+      AlarmDescription: Alarm when Repo Manager instance status check fails for 5
         consecutive minutes.
-      AlarmName: !Sub Repo-ConsoleHealthy-${Environment}
+      AlarmName: !Sub Repo-ManagerHealthy-${Environment}
       Namespace: AWS/EC2
       MetricName: StatusCheckFailed_System
       OKActions:
@@ -1006,16 +511,16 @@ Resources:
       Threshold: '0'
       Dimensions:
       - Name: InstanceId
-        Value: !Ref ConsoleServerInstance
+        Value: !Ref ManagerServerInstance
 
-  ConsoleCPUAlarm:
+  ManagerCPUAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
       ActionsEnabled: true
       AlarmActions:
         - !Ref RepoSNSARN
       AlarmDescription: Alarm if console CPU is heavily utilized
-      AlarmName: !Sub Repo-ConsoleCPUAlarm80-${Environment}
+      AlarmName: !Sub Repo-ManagerCPUAlarm80-${Environment}
       ComparisonOperator: GreaterThanOrEqualToThreshold
       EvaluationPeriods: 1
       MetricName: CPUUtilization
@@ -1027,88 +532,17 @@ Resources:
       Threshold: '80'
       Dimensions:
         - Name: InstanceId
-          Value: !Ref ConsoleServerInstance
+          Value: !Ref ManagerServerInstance
 
-  EngineALBHostCountAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      ActionsEnabled: true
-      AlarmActions:
-        - !Ref RepoSNSARN
-      AlarmDescription: Alarm if Engine ALB goes below 2 instances
-      AlarmName: !Sub Repo-EngineALBHealthyHostAlarm-${Environment}
-      ComparisonOperator: LessThanOrEqualToThreshold
-      EvaluationPeriods: 1
-      MetricName: HealthyHostCount
-      Namespace: AWS/ApplicationELB
-      OKActions:
-       - !Ref RepoSNSARN
-      Period: '60'
-      Statistic: Minimum
-      Threshold: 1
-      Dimensions:
-        - Name: LoadBalancer
-          Value: !GetAtt EngineALB.LoadBalancerFullName
-        - Name: TargetGroup
-          Value: !GetAtt EngineALBTargetGroup.TargetGroupFullName
-
-  RDSCPUAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      ActionsEnabled: true
-      AlarmActions:
-        - !Ref RepoSNSARN
-      AlarmDescription: Alarm if RDS CPU is heavily utilized
-      AlarmName: !Sub Repo-RDSCPUAlarm80-${Environment}
-      ComparisonOperator: GreaterThanOrEqualToThreshold
-      EvaluationPeriods: 1
-      MetricName: CPUUtilization
-      Namespace: AWS/RDS
-      OKActions:
-       - !Ref RepoSNSARN
-      Period: '60'
-      Statistic: Average
-      Threshold: '80'
-      Dimensions:
-        - Name: DBInstanceIdentifier
-          Value: !Ref RepoDB
-
-  # RDSCreateSchemaLambda:
-  #   Type: AWS::Lambda::Function
-  #   Properties: 
-  #     Code: 
-  #       S3Bucket: !Sub wawa-infra-Repo-${Environment}
-  #       S3Key: rds_deploy_lambda.zip
-  #     Description: Deploys database schema required for Repo Oauth
-  #     Environment: 
-  #       Variables:
-  #         host: feduatgrds.wawa.com
-  #         user: admin
-  #         password: testing
-  #         database: Repo
-  #     FunctionName: !Sub wawa-infra-Repo-${Environment}-rdsschema
-  #     Handler: lambda_handler
-  #     MemorySize: 256
-  #     Role: !Ref RDSSchemaDeployRole
-  #     Runtime: python3.8
-  #     VpcConfig: 
-  #       SecurityGroupIds: 
-  #         - String
-  #       SubnetIds: 
-  #         - String
-
-  DashboardSideBySide:
+ 
+   DashboardSideBySide:
     Type: AWS::CloudWatch::Dashboard
     Properties:
       DashboardName: !Sub Repo-Health-${Environment}
       DashboardBody: !Sub | 
-        {"widgets":[{"type":"metric","x":0,"y":0,"width":12,"height":6,"properties":{"metrics":[["AWS/EC2","CPUUtilization","InstanceId","${ConsoleServerInstance}"]],"period":300,"stat":"Average","region":"us-east-1","title":"Repo - Console CPU"}},
-                  {"type":"metric","x":0,"y":6,"width":12,"height":6,"properties":{"metrics":[["AWS/EC2","StatusCheckFailed_System","InstanceId","${ConsoleServerInstance}"]],"period":300,"stat":"Maximum","region":"us-east-1","title":"Repo - Failed Status Checks"}},
-                  {"type":"metric","x":12,"y":0,"width":12,"height":6,"properties":{"metrics":[["AWS/RDS","CPUUtilization","DBInstanceIdentifier","${RepoDB}"]],"period":300,"stat":"Average","region":"us-east-1","title":"Repo - RDS CPU"}},
-                  {"type":"metric","x":12,"y":6,"width":12,"height":6,"properties":{"metrics":[["AWS/ApplicationELB","HealthyHostCount","LoadBalancer","${EngineALB.LoadBalancerFullName}", "TargetGroup", "${EngineALBTargetGroup.TargetGroupFullName}" ]],"period":86400,"stat":"Minimum","region":"us-east-1","title":"Repo - Healthy Engines"}}]}
+        {"widgets":[{"type":"metric","x":0,"y":0,"width":12,"height":6,"properties":{"metrics":[["AWS/EC2","CPUUtilization","InstanceId","${ManagerServerInstance}"]],"period":300,"stat":"Average","region":"us-east-1","title":"Repo - Manager CPU"}},
+                  {"type":"metric","x":0,"y":6,"width":12,"height":6,"properties":{"metrics":[["AWS/EC2","StatusCheckFailed_System","InstanceId","${ManagerServerInstance}"]],"period":300,"stat":"Maximum","region":"us-east-1","title":"Repo - Failed Status Checks"}
+                  
 
 Outputs: 
 
-  EngineALBURL:
-    Description: ALB URL to access Repo Engines (HTTPS)'
-    Value: !GetAtt EngineALB.DNSName
